@@ -3,31 +3,10 @@ from langchain_core.messages import HumanMessage, ToolMessage
 from langgraph.types import Command
 
 from graph import graph_obj
+from utils import interactive_human_handler, handle_interrupt, request_user_input
 
-# ----------- Config -----------
-
-config = {"configurable": {"thread_id": "1"}}
-
-def interactive_human_handler(query: str) -> str:
-    print(f"[Graph paused for human assistance: “{query}”]")
-    try:
-        return input("👨🏻‍💻 Human assistance: ").strip()
-    except EOFError:
-        print("⚠️ Input not available. Using fallback.")
-        return "Sorry, no one is available right now."
-
-
-def handle_interrupt(event, human_handler: Callable[[str], str]) -> Command:
-    interrupt_event = event["__interrupt__"][0]
-    query = interrupt_event.value.get("query", "[No query provided]")
-    human_reply = human_handler(query)
-    print(f"[Human → {human_reply}]\n")
-    return Command(resume={"data": human_reply})
-
-# ----------- Core Loop -----------
-
-def stream_graph_updates(user_input: str) -> str:
-    stream_mode = ["values", "debug"]
+def stream_graph_updates(config, user_input: str) -> str:
+    stream_mode = ["values", "debug", "tokens"]
     message = HumanMessage(content=user_input)
     state = {"messages": [message]}
     iterator = graph_obj.stream(state, config, stream_mode=stream_mode)
@@ -43,13 +22,11 @@ def stream_graph_updates(user_input: str) -> str:
         except StopIteration:
             break
 
-        # Debug: track current node
         if stream_type == "debug":
             current_node = event_obj.get("payload", {}).get("name")
             if current_node:
                 print(f"📍 Node: {current_node}")
 
-        # Handle interrupt (tool-based human input)
         if "__interrupt__" in event_obj:
             cmd = handle_interrupt(event_obj, human_handler)
 
@@ -67,7 +44,6 @@ def stream_graph_updates(user_input: str) -> str:
             iterator = graph_obj.stream(cmd, config, stream_mode=stream_mode)
             continue
 
-        # Capture assistant message
         if "messages" in event_obj:
             last_ai_message = next(
                 (msg for msg in reversed(event_obj["messages"]) if msg.type == "ai"),
@@ -77,31 +53,43 @@ def stream_graph_updates(user_input: str) -> str:
                 last_ai_message.pretty_print()
                 state["messages"].append(last_ai_message)
 
-                # If we're in `confirm_topic`, ask the user to confirm
-                if current_node == "awaiting_user_confirmation":
-                    user_confirmation = input("🧠 Do you want to consult a human? (yes/no): ").strip().lower()
-                    confirmation_msg = HumanMessage(content=user_confirmation)
-                    state["messages"].append(confirmation_msg)
-                    iterator = graph_obj.stream(state, config, stream_mode=stream_mode)
-                    continue
+                # ✅ Extrair token usage
+                usage = last_ai_message.response_metadata.get("token_usage", {})
+                prompt = usage.get("prompt_tokens", 0)
+                completion = usage.get("completion_tokens", 0)
+                total = usage.get("total_tokens", 0)
+                print(f"🧠 Token usage — Prompt: {prompt}, Completion: {completion}, Total: {total}")
 
-        if current_node == "end_conversation" and stream_type == "values":
-            terminal_node = "END"
-            break
+            if current_node == "end_conversation_node" and stream_type == "values":
+                terminal_node = "END"
+                break
 
     return terminal_node
 
-# ----------- CLI -----------
-
+# --------------------------------- CLI ---------------------------------
 def cli_loop():
+    # Hard-coded values: this may change ot become customizable through UI.
+    config = {
+        "stream_mode": "values",
+        "stream": True,
+        "stream_interval": 0.1,
+        "max_tokens": 100,
+        "temperature": 0.5,
+        "configurable": {
+            "user_id": "default_user",
+            "thread_id": "thread-1"
+        }
+    }
+
     while True:
         try:
-            user_input = input("👤 User (you): ").strip()
+            user_input = request_user_input()
             if not user_input:
                 print("⚠️ Empty input. Please type something.")
                 continue
 
-            terminal_node = stream_graph_updates(user_input)
+            terminal_node = stream_graph_updates(config, user_input)
+
             if terminal_node == "END":
                 print("👋 Goodbye!")
                 break
